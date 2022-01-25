@@ -65,13 +65,17 @@ class UniAttention(nn.Module):
 
         self._attn_scores = attn_scores.detach()[0]
         probs = attn_scores.softmax(dim=-1)
-        normed_v = t.norm(v.detach(), dim=-1)
-        weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs.detach(), normed_v)
-        combined_v = t.einsum('bhqk, bhkl -> bhql', probs, v)
+                
+        o_heads = einops.rearrange(self.project_output.weight, '(h1 l1) (h2 l2) -> h1 l1 h2 l2', h1 = self.n_heads, h2 = self.n_heads)
+        ov = t.einsum('imhl,bhnl -> binm', o_heads, v.detach())
+        normed_ov = t.norm(ov, dim=-1).detach()
+        weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs.detach(), normed_ov).detach()
         
+        combined_v = t.einsum('bhqk, bhkl -> bhql', probs, v)
         combined_v = einops.rearrange(combined_v, 'b h q l -> b q (h l)')
         self._combined_v = combined_v
         out = self.project_output(combined_v)
+        
         return out, weighted_attn_score
 
     def weight_matrix(self, qkvo: str, head: int):

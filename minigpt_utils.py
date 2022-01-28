@@ -67,9 +67,10 @@ class UniAttention(nn.Module):
         probs = attn_scores.softmax(dim=-1)
                 
         o_heads = einops.rearrange(self.project_output.weight, '(h1 l1) (h2 l2) -> h1 l1 h2 l2', h1 = self.n_heads, h2 = self.n_heads)
-        ov = t.einsum('imhl,bhnl -> binm', o_heads, v.detach())
-        normed_ov = t.norm(ov, dim=-1).detach()
-        weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs.detach(), normed_ov).detach()
+        ov = t.einsum('imhl,bhnl -> binm', o_heads, v)
+        normed_ov = t.norm(ov, dim=-1)
+        weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs, normed_ov)
+        assert weighted_attn_score.requires_grad
         
         combined_v = t.einsum('bhqk, bhkl -> bhql', probs, v)
         combined_v = einops.rearrange(combined_v, 'b h q l -> b q (h l)')
@@ -103,11 +104,29 @@ class MiniGPT(nn.Module):
         for block in self.blocks:
             emb = emb + block(emb, self.pos_embedding)[0]
         return t.einsum('bnl, vl -> bnv', emb, self.token_embedding.weight)
+
+    def forward_smooth_input(self, input):
+        emb = t.einsum('bnv, vl -> bnl', input, self.token_embedding.weight)
+        for block in self.blocks:
+            emb = emb + block(emb, self.pos_embedding)[0]
+        return t.einsum('bnl, vl -> bnv', emb, self.token_embedding.weight)
     
     def weighted_attention(self, input_ids):
         # -> [n_layer, n_batch, n_head, q, k]
         save_weighted_attn = None
         emb = self.token_embedding(input_ids)
+        for block in self.blocks:
+            block_out, block_weighted_attn = block(emb, self.pos_embedding)
+            if save_weighted_attn is not None:
+                save_weighted_attn = t.stack((save_weighted_attn, block_weighted_attn), dim=0)
+            else:
+                save_weighted_attn = block_weighted_attn
+            emb = emb + block_out
+        return save_weighted_attn
+
+    def weighted_attention_smooth_input(self, input):
+        save_weighted_attn = None
+        emb = t.einsum('bnv, vl -> bnl', input, self.token_embedding.weight)
         for block in self.blocks:
             block_out, block_weighted_attn = block(emb, self.pos_embedding)
             if save_weighted_attn is not None:

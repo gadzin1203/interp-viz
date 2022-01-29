@@ -48,13 +48,14 @@ def generate(model, bs, temp, vocab, device):
 
 @gin.configurable
 def train(
-    gen_model: GumbelSoftmax,
+    experiment,
     device: str,
-    reward_fn,
-    reward_fn_args,
-    penalty_fn = None,
-    penalty_fn_args = {},
-    vocab = None,
+    reward_fn, # gin
+    head: int, # gin
+    layer: int, # gin
+    penalty_fn = None, # gin
+    p_coef = 0., # gin
+    vocab = None, # gin
     temp_schedule = linear,
     batch_size:int = 2,
     num_batches:int = 3,
@@ -62,16 +63,18 @@ def train(
     logging:bool = True,
     comet_tag:str = "experiment",
 ):
+    # Temp hardcoding for rrjobs
+    gen_prompt = t.nn.functional.one_hot(t.tensor([[50257]], dtype=t.long, device=device), num_classes=VOCAB_SIZE)
+    eval_model = get_minigpt("model.pt").to(device)
+    reward_fn = reward_fns()[reward_fn]
+    penalty_fn = penalty_fns()[penalty_fn]
+    vocab = allowed_vocab()[vocab]
+    gen_model = GumbelSoftmax(24, len(vocab)).to(device)
+
     optimizer = t.optim.Adam(gen_model.parameters(), lr=lr)
     scheduler = t.optim.lr_scheduler.LambdaLR(optimizer, lambda e: 0.99995**e) # TODO not doing much
 
     if logging:
-        experiment = Experiment(
-            api_key="Khyn4qyMFwwh4ezfJpFQvydhQ",
-            project_name="interp-viz",
-            workspace="gadzin1203",
-            auto_output_logging=False,
-        )
         experiment.add_tag(comet_tag)
         experiment.log_parameters(reward_fn_args)
         experiment.log_parameters(penalty_fn_args)
@@ -86,10 +89,10 @@ def train(
             # get model response
             response_tensor = generate(gen_model, batch_size, temp, vocab, device)
             # reward fn may return auxillary dict of metrics that we are not scoring on
-            reward, reward_metrics = reward_fn(response_tensor, **reward_fn_args)
+            reward, reward_metrics = reward_fn(response_tensor, gen_prompt=gen_prompt, eval_model=eval_model, head=head, layer=layer)
 
             if penalty_fn is not None:
-                penalty = penalty_fn(response_tensor, **penalty_fn_args)
+                penalty = p_coef*penalty_fn(response_tensor)
             else:
                 penalty = 0
 
@@ -170,7 +173,8 @@ def is_next_five(response_tensor: t.Tensor, layer: int, head: int, eval_model, g
 def entropy(probs): # blv -> l
     return -t.mean(t.sum(probs*t.log(probs), dim=-1), dim=0)
 
-def dist_from_sentence_basic(probs, sentence): # blv, l -> l
+def dist_from_sentence_basic(probs): # blv, l -> l
+    sentence = tokenizer(" So far, we've developed a theoretical model for understanding two-layer attention-only models. We have an overall equation", return_tensors="pt").input_ids[0]
     return t.mean(t.nn.functional.cross_entropy(
         rearrange(probs, 'b l v -> b v l'),
         repeat(sentence, 'l -> b l', b = probs.shape[0]),
@@ -188,7 +192,7 @@ def dist_from_sentence_ref_model(probs, sentence, ref_model, ref_model_vocab_siz
 def reward_fns():
     return {"head_avg": head_avg, "head_max": head_max, "head_normed_avg": head_normed_avg, "head_normed_max": head_normed_max}
 
-def penalty_fn():
+def penalty_fns():
     return {"entropy": entropy, "dist_from_sentence_basic": dist_from_sentence_basic}
 
 def penalty_coef():
@@ -207,7 +211,7 @@ def allowed_vocab():
     top100_v2 = t.topk(v2, k=100).indices
     top300_v2 = t.topk(v2, k=300).indices
     top1000_v2 = t.topk(v2, k=1000).indices
-    return [top100_v2, top300_v2, top1000_v2, None]
+    return {"100": top100_v2, "300": top300_v2, "1000": top1000_v2, "None": None}
 
 ### Running
 

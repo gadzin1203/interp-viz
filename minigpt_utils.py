@@ -68,16 +68,22 @@ class UniAttention(nn.Module):
                 
         o_heads = einops.rearrange(self.project_output.weight, '(h1 l1) (h2 l2) -> h1 l1 h2 l2', h1 = self.n_heads, h2 = self.n_heads)
         ov = t.einsum('imhl,bhnl -> binm', o_heads, v)
-        normed_ov = t.norm(ov, dim=-1)
+        normed_ov = t.norm(ov, dim=-1) # b, h, k
         weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs, normed_ov)
         assert weighted_attn_score.requires_grad
+
+        mean_ov = t.mean(normed_ov, keepdim=True, dim=-1) # b, h
+        var_ov = t.var(normed_ov, keepdim=True, dim=-1)
+        normalized_ov = t.clip(0.5 + 0.2*(normed_ov - mean_ov)/t.sqrt(var_ov + 1e-8), min=0, max=1)
+        normed_attn_score = t.einsum('bhqk, bhk -> bhqk', probs, normalized_ov)
+        assert normed_attn_score.requires_grad
         
         combined_v = t.einsum('bhqk, bhkl -> bhql', probs, v)
         combined_v = einops.rearrange(combined_v, 'b h q l -> b q (h l)')
         self._combined_v = combined_v
         out = self.project_output(combined_v)
         
-        return out, weighted_attn_score
+        return out, weighted_attn_score, normed_attn_score
 
     def weight_matrix(self, qkvo: str, head: int):
         if qkvo in 'qkv':
@@ -114,27 +120,33 @@ class MiniGPT(nn.Module):
     def weighted_attention(self, input_ids):
         # -> [n_layer, n_batch, n_head, q, k]
         save_weighted_attn = None
+        save_normed_attn = None
         emb = self.token_embedding(input_ids)
         for block in self.blocks:
-            block_out, block_weighted_attn = block(emb, self.pos_embedding)
+            block_out, block_weighted_attn, block_normed_attn = block(emb, self.pos_embedding)
             if save_weighted_attn is not None:
                 save_weighted_attn = t.stack((save_weighted_attn, block_weighted_attn), dim=0)
+                save_normed_attn = t.stack((save_normed_attn, block_normed_attn), dim=0)
             else:
                 save_weighted_attn = block_weighted_attn
+                save_normed_attn = block_normed_attn
             emb = emb + block_out
-        return save_weighted_attn
+        return save_weighted_attn, save_normed_attn
 
     def weighted_attention_smooth_input(self, input):
         save_weighted_attn = None
+        save_normed_attn = None
         emb = t.einsum('bnv, vl -> bnl', input, self.token_embedding.weight)
         for block in self.blocks:
-            block_out, block_weighted_attn = block(emb, self.pos_embedding)
+            block_out, block_weighted_attn, block_normed_attn = block(emb, self.pos_embedding)
             if save_weighted_attn is not None:
                 save_weighted_attn = t.stack((save_weighted_attn, block_weighted_attn), dim=0)
+                save_normed_attn = t.stack((save_normed_attn, block_normed_attn), dim=0)
             else:
                 save_weighted_attn = block_weighted_attn
+                save_normed_attn = block_normed_attn
             emb = emb + block_out
-        return save_weighted_attn
+        return save_weighted_attn, save_normed_attn
 
     def layer0_embedding_contributions(self, input_ids):
         emb = [self.token_embedding(input_ids)]

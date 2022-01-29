@@ -70,13 +70,11 @@ class UniAttention(nn.Module):
         ov = t.einsum('imhl,bhnl -> binm', o_heads, v)
         normed_ov = t.norm(ov, dim=-1) # b, h, k
         weighted_attn_score = t.einsum('bhqk, bhk -> bhqk', probs, normed_ov)
-        assert weighted_attn_score.requires_grad
 
         mean_ov = t.mean(normed_ov, keepdim=True, dim=-1) # b, h
         var_ov = t.var(normed_ov, keepdim=True, dim=-1)
         normalized_ov = t.clip(0.5 + 0.2*(normed_ov - mean_ov)/t.sqrt(var_ov + 1e-8), min=0, max=1)
         normed_attn_score = t.einsum('bhqk, bhk -> bhqk', probs, normalized_ov)
-        assert normed_attn_score.requires_grad
         
         combined_v = t.einsum('bhqk, bhkl -> bhql', probs, v)
         combined_v = einops.rearrange(combined_v, 'b h q l -> b q (h l)')

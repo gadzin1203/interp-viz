@@ -69,6 +69,8 @@ def train(
     reward_fn = reward_fns()[reward_fn]
     penalty_fn = penalty_fns()[penalty_fn]
     vocab = allowed_vocab()[vocab]
+    if vocab is not None:
+        vocab = vocab.tolist()
     gen_model = GumbelSoftmax(24, len(vocab)).to(device)
 
     optimizer = t.optim.Adam(gen_model.parameters(), lr=lr)
@@ -76,8 +78,8 @@ def train(
 
     if logging:
         experiment.add_tag(comet_tag)
-        experiment.log_parameters(reward_fn_args)
-        experiment.log_parameters(penalty_fn_args)
+        experiment.log_parameters({"head": head, "layer": layer})
+        experiment.log_parameters({"penalty_coef": p_coef})
         experiment.log_parameters({"bs": batch_size, "reward_fn": reward_fn.__name__, "vocab_size": len(vocab)})
         if penalty_fn is not None:
             experiment.log_parameters({"penalty_fn": penalty_fn.__name__})            
@@ -97,7 +99,7 @@ def train(
                 penalty = 0
 
             # train model
-            loss = -t.mean(reward) + penalty
+            loss = -t.mean(reward) + t.mean(penalty)
             loss.backward()
             if t.any(t.isnan(gen_model.weight.grad)):
                 raise Exception
@@ -108,7 +110,7 @@ def train(
 
             with t.no_grad():
                 val_sample = generate(gen_model, batch_size, 1e-4, vocab, device)
-                val_reward, _ = reward_fn(val_sample, **reward_fn_args)
+                val_reward, _ = reward_fn(val_sample, gen_prompt=gen_prompt, eval_model=eval_model, head=head, layer=layer)
                 val_loss = -t.mean(val_reward)
                 scheduler.step(val_loss)
 
@@ -174,7 +176,7 @@ def entropy(probs): # blv -> l
     return -t.mean(t.sum(probs*t.log(probs), dim=-1), dim=0)
 
 def dist_from_sentence_basic(probs): # blv, l -> l
-    sentence = tokenizer(" So far, we've developed a theoretical model for understanding two-layer attention-only models. We have an overall equation", return_tensors="pt").input_ids[0]
+    sentence = tokenizer(" So far, we've developed a theoretical model for understanding two-layer attention-only models. We have an overall equation", return_tensors="pt").input_ids[0].to("cuda")
     return t.mean(t.nn.functional.cross_entropy(
         rearrange(probs, 'b l v -> b v l'),
         repeat(sentence, 'l -> b l', b = probs.shape[0]),
